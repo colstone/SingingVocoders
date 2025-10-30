@@ -1,0 +1,143 @@
+base_config:
+  - configs/base.yaml
+
+# Task entry
+task_cls: training.refinegan_task.RefineGAN
+
+# Preprocessing / dataset paths
+data_input_path: []
+data_out_path: []
+val_num: 10
+
+# Pitch extraction
+pe: 'parselmouth'  # 'parselmouth' | 'harvest' | 'crepe'
+f0_min: 40
+f0_max: 2500
+
+# Key/pitch augmentation (offline uses process_aug.py, online handled in dataset)
+aug_min: 0.9
+aug_max: 1.4
+aug_num: 2
+key_aug: false
+key_aug_prob: 0.75
+
+# Loss switches (align with nsf-hifigan)
+use_stftloss: false
+loss_fft_sizes: [2048, 2048, 4096, 1024, 512, 256, 128, 1024, 2048, 512]
+loss_hop_sizes: [512, 240, 480, 100, 50, 25, 12, 120, 240, 50]
+loss_win_lengths: [2048, 1200, 2400, 480, 240, 120, 60, 600, 1200, 240]
+lab_aux_melloss: 45
+lab_aux_stftloss: 2.5
+
+# Loudness augmentation
+volume_aug: true
+volume_aug_prob: 0.5
+
+# Index files
+DataIndexPath: data
+valid_set_name: valid
+train_set_name: train
+
+# Visualization ranges
+mel_vmin: -6.
+mel_vmax: 1.5
+
+# Audio / mel params
+audio_sample_rate: 44100
+audio_num_mel_bins: 128
+hop_size: 256             # RefineGAN paper uses 256
+fft_size: 2048            # FFT size
+win_size: 2048            # Window size
+fmin: 40
+fmax: 16000
+fmax_for_loss: null
+crop_mel_frames: 20
+
+# Model-specific arguments (RefineGAN)
+model_args:
+  # Generator
+  downsample_rates: [2, 2, 8, 8]
+  upsample_rates: [8, 8, 2, 2]
+  start_channels: 16
+  leaky_relu_slope: 0.2
+  template_generator: comb  # 'pulse' (paper), 'comb', or 'sine'
+
+  # Discriminators
+  use_mrd: true
+  use_msd: false
+  # Toggle to use MultiBand MRD instead of original MRD
+  use_mbmrd: false
+  mbmrd_fft_sizes: [2048, 1024, 512]
+  mbmrd_hop_factor: 0.25
+  mpd_periods: [2, 3, 5, 7, 11]
+  mrd_resolutions:
+    - [1024, 120, 600]
+    - [2048, 240, 1200]
+    - [512, 50, 240]
+
+  # Multi-scale mels for generator mel loss
+  multi_scale_mels:
+    - [2048, 256, 2048]
+    - [2048, 270, 1080]
+    - [4096, 540, 2160]
+
+# Optimizers (G and D)
+discriminate_optimizer_args:
+  optimizer_cls: torch.optim.AdamW
+  lr: 0.0001
+  beta1: 0.8
+  beta2: 0.99
+  weight_decay: 0
+
+generater_optimizer_args:
+  optimizer_cls: torch.optim.AdamW
+  lr: 0.0001
+  beta1: 0.8
+  beta2: 0.99
+  weight_decay: 0
+
+# LR scheduler (not used in current task wiring, kept for compatibility)
+lr_scheduler_args:
+  scheduler_cls: lr_scheduler.scheduler.WarmupLR
+  warmup_steps: 5000
+  min_lr: 0.00001
+
+# Dataloading / training runtime
+ds_workers: 0
+dataloader_prefetch_factor: null
+batch_size: 4
+
+num_valid_plots: 100
+log_interval: 100
+num_sanity_val_steps: 1
+val_check_interval: 50
+num_ckpt_keep: 5
+max_updates: 1000
+permanent_ckpt_start: 200000
+permanent_ckpt_interval: 40000
+clip_grad_norm: null
+
+###########
+# PyTorch Lightning
+###########
+pl_trainer_accelerator: 'auto'
+pl_trainer_devices: 'auto'
+pl_trainer_precision: '32-true'
+pl_trainer_num_nodes: 1
+pl_trainer_strategy:
+  name: auto
+  process_group_backend: nccl
+  find_unused_parameters: true
+nccl_p2p: true
+seed: 114514
+
+###########
+# Finetune / freezing
+###########
+finetune_enabled: false
+finetune_ckpt_path: null
+finetune_ignored_params: []
+finetune_strict_shapes: true
+
+freezing_enabled: false
+frozen_params: []
