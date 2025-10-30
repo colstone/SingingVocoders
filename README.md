@@ -1,14 +1,15 @@
 # SingingVocoders
+
 A collection of neural vocoders suitable for singing voice synthesis tasks.
 
-# English version [README_en.md](README_en.md)
-## If you have any questions, please open an issue.
+## If you have any questions, please open an issue. DO NOT contact OpenVPI and contact me frist.
 
+# 预处理
 
-# 预处理 
 python [process.py](process.py) --config 配置文件 --num_cpu 并行数量 --strx 1 代表 强制绝对路径 0 代表相对路径
 
 和预处理有关的配置文件项
+
 ```yaml
 DataIndexPath: dataX11 # 这个是训练数据 index 的位置预处理会自动生成
 
@@ -24,6 +25,7 @@ val_num: 10 # 这个是你要的 val 数量
 ```
 
 例子
+
 ```yaml
 data_input_path: ['wav/in1','wav/in2'] # 这个是你的wav的输入目录
 
@@ -33,21 +35,28 @@ val_num: 5 # 这个是你要的 val 数量，预处理的时候会自动抽取�
 # 然后预处理的时候会扫描全部的 .wav 和 .flac 文件，包括子文件夹的
 # 正常情况下只有这三个要改
 ```
+
 # 在线数据增强（推荐）
+
 增加配置项
+
 ```yaml
 key_aug: true # 表示在训练时进行增强
 key_aug_prob: 0.5 # 增强概率
 aug_min: 0.9 # 最小变调倍数
 aug_max: 1.4 # 最大变调倍数
 ```
+
 注意数据增强可能会损伤音质！
+
 # 训练
+
 ```sh
 python [train.py](train.py) --config 配置文件 --exp_name ckpt名字 --work_dir 工作目录（可选）
 ```
 
 # 导出
+
 ```sh
 python [export_ckpt.py](export_ckpt.py) --ckpt_path ckpt路径  --save_path 导出的ckpt路径 --work_dir 工作目录（可选） 
 ```
@@ -69,48 +78,66 @@ python [export_ckpt.py](export_ckpt.py) --ckpt_path ckpt路径  --save_path 导�
 # 快速开始
 
 ## 预处理
+
 以下是你需要根据自己的数据集修改的配置项
+
 ```yaml
 data_input_path: [] # 这个列表 是你原始wav文件的路径
 data_out_path: [] # 此列表 预处理输出的npz文件的路径
 val_num: 10 # 这个是在验证的时候 抽取的音频文件数量
 ```
+
 然后执行预处理
+
 ```sh
 python process.py --config (your config path) --num_cpu (Number of cpu threads used in preprocessing)  --strx (1 for a forced absolute path 0 for a relative path)
 ```
+
 ## 训练
+
 根据自己的显卡修改配置项
 （默认开启mini_nsf和pc_aug，特殊需要请自行关闭并修改配置文件，此处不作推荐）
 
 以下是24G显卡推荐配置（默认设定无需修改）
+
 ```yaml
 crop_mel_frames: 48
 batch_size: 10
 pc_aug_rate: 0.5
 ```
+
 以下是16G显卡推荐配置（需手动编辑或添加配置）
+
 ```yaml
 crop_mel_frames: 32
 batch_size: 10
 pc_aug_rate: 0.4
 ```
+
 训练命令
+
 ```sh
 python train.py --config (your config path) --exp_name (your ckpt name) --work_dir Working catalogue (optional)
 ```
+
 测试中的配置项
+
 ```yaml
 use_stftloss: false # 是否启用stft loss
 lab_aux_melloss: 45
 lab_aux_stftloss: 2.5 # 两种loss的混合控制
 ```
+
 如果有其他需要可以修改 stftloss 的其他相关参数
+
 ## 导出
+
 ```sh
 python export_ckpt.py --ckpt_path (your ckpt path)  --save_path (output ckpt path) --work_dir Working catalogue (optional)
 ```
+
 # 注意事项
+
 实际步数是显示的一半
 
 微调 nsf-hifigan 声码器请下载并解压 [releases](https://github.com/openvpi/SingingVocoders/releases) 中的权重，并将 [ft_hifigan.yaml](configs/ft_hifigan.yaml) 中的 'finetune_ckpt_path' 选项改为权重路径
@@ -132,6 +159,7 @@ python export_ckpt.py --ckpt_path (your ckpt path)  --save_path (output ckpt pat
 冻结 mpd 模块可能可以有更好的结果
 
 # 其它模型
+
 [HiFivae.yaml](configs/HiFivae.yaml)hifivae.yaml 训练vae模型
 
 [base_hifi_chroma.yaml](configs/base_hifi_chroma.yaml) 训练忽略8度nsf hifigan
@@ -148,18 +176,20 @@ python export_ckpt.py --ckpt_path (your ckpt path)  --save_path (output ckpt pat
 
 [lvc_base_ddspgan.yaml](configs/lvc_base_ddspgan.yaml) 训练使用lvc滤波器的 ddsp模型
 
-# 特别声明
 
-我们遗憾地公示一份经核实的《不友好行为备案清单》（下附）。该名单记录了长期对开发团队实施破坏性行径的个人/实体。
-我们郑重声明：
 
-1. 强烈建议所有使用者在下载和使用此声码器前阅读本备案清单
-2. 当前未对名单主体施加任何技术或法律层面的使用限制，因为声码器仍基于 CC BY-NC-SA 4.0 许可
-3. 若持续发生恶意行为，保留进一步施加限制的权利
+on this fork:
 
-## 不友好行为备案清单
+[refinegan.yaml](configs/refinegan.yaml) 训练RefineGAN
 
-|        名称        | 标识                                                                     | 原因                                                             |
-|:----------------:|:-----------------------------------------------------------------------|:---------------------------------------------------------------|
-| 旋转_turning_point | QQ：2673587414；<br/>Bilibili UID：285801087；<br/>Discord 用户名：colstone233 | 长期对开发者进行敌对和人身攻击，反复传播关于 DiffSinger 和开发团队的虚假信息，干扰声码器及其他社区项目的开发进程 |
+[refinegan-hop512.yaml](configs/refinegan.yaml) 训练hop size为512的RefineGAN
+
+
+
+## 特别声明
+
+本fork的RefineGAN部分与OpenVPI *无任何关联*，如有关于此fork的问题请优先联系我，而不是OpenVPI，避免给我以及Team OpenVPI造成困扰和误会，感谢。
+
+本fork无其他任何声明，也无任何black list与unfriendly list，欢迎各位指导与使用。
+
 
