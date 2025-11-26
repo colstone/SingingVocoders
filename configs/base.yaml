@@ -11,3 +11,6 @@ aug_max: 1.4
 aug_num: 1
 key_aug: false
 key_aug_prob: 0.5
+
+# logging
+logger: tensorboard

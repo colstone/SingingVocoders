@@ -24,6 +24,113 @@ logging.basicConfig(stream=sys.stdout, level=logging.INFO,
                     format=log_format, datefmt='%m/%d %I:%M:%S %p')
 
 
+def _prepare_audio_list(audio):
+    import numpy as np
+
+    if hasattr(audio, 'detach'):
+        audio = audio.detach()
+    if hasattr(audio, 'cpu'):
+        audio = audio.cpu()
+    audio_np = np.array(audio)
+    if audio_np.ndim == 3 and audio_np.shape[1] == 1:
+        audio_np = audio_np[:, 0, :]
+    if audio_np.ndim == 1:
+        audio_np = audio_np[None, :]
+    elif audio_np.ndim < 2:
+        audio_np = np.array([audio_np]).reshape(1, -1)
+    return [audio_np[i] for i in range(audio_np.shape[0])]
+
+
+def build_logger(logger_type, work_dir: pathlib.Path, exp_name: str):
+    logger_type = (logger_type or 'tensorboard').lower()
+    if logger_type == 'tensorboard':
+        return TensorBoardLogger(
+            save_dir=str(work_dir),
+            name='lightning_logs',
+            version='lastest'
+        )
+
+    if logger_type == 'wandb':
+        try:
+            from lightning.pytorch.loggers import WandbLogger
+            from lightning.pytorch.loggers.logger import rank_zero_experiment
+        except Exception as exc:
+            raise ImportError("Please install wandb to enable the wandb logger.") from exc
+
+        class WandbLoggerWithMedia(WandbLogger):
+            @property
+            @rank_zero_experiment
+            def experiment(self):
+                base_run = super().experiment
+
+                class _WandbExperimentAdapter:
+                    def __init__(self, run):
+                        self._run = run
+
+                    def __getattr__(self, item):
+                        return getattr(self._run, item)
+
+                    def add_audio(self, tag, audio, sample_rate, global_step=None):
+                        import wandb
+
+                        audio_list = _prepare_audio_list(audio)
+                        payload = [wandb.Audio(a, sample_rate=sample_rate) for a in audio_list]
+                        self._run.log({tag: payload if len(payload) > 1 else payload[0]}, step=global_step)
+
+                    def add_figure(self, name, fig, global_step=None):
+                        import wandb
+
+                        self._run.log({name: wandb.Image(fig)}, step=global_step)
+
+                return _WandbExperimentAdapter(base_run)
+
+        return WandbLoggerWithMedia(
+            project=exp_name,
+            name=exp_name,
+            save_dir=str(work_dir),
+            log_model=False,
+        )
+
+    if logger_type == 'swanlab':
+        try:
+            from swanlab.integration.pytorch_lightning import SwanLabLogger
+            from lightning.pytorch.loggers.logger import rank_zero_experiment
+        except Exception as exc:
+            raise ImportError("Please install swanlab to enable the swanlab logger.") from exc
+
+        class SwanLabLoggerWithMedia(SwanLabLogger):
+            @property
+            @rank_zero_experiment
+            def experiment(self):
+                run = super().experiment
+
+                class _SwanLabExperimentAdapter:
+                    def __init__(self, inner_run, logger_obj):
+                        self._run = inner_run
+                        self._logger = logger_obj
+
+                    def __getattr__(self, item):
+                        return getattr(self._run, item)
+
+                    def add_audio(self, tag, audio, sample_rate, global_step=None):
+                        audio_list = _prepare_audio_list(audio)
+                        sr_list = [sample_rate] * len(audio_list)
+                        self._logger.log_audio(tag, audio_list, step=global_step, sample_rate=sr_list)
+
+                    def add_figure(self, name, fig, global_step=None):
+                        self._logger.log_image(name, [fig], step=global_step)
+
+                return _SwanLabExperimentAdapter(run, self)
+
+        return SwanLabLoggerWithMedia(
+            project=exp_name,
+            experiment_name=exp_name,
+            save_dir=str(work_dir),
+        )
+
+    raise ValueError(f"Unsupported logger type '{logger_type}'. Use 'tensorboard', 'wandb' or 'swanlab'.")
+
+
 @click.command(help='')
 @click.option('--config', required=True, metavar='FILE', help='Path to the configuration file')
 @click.option('--exp_name', required=True, metavar='EXP', help='Name of the experiment')
@@ -86,11 +193,7 @@ def train(config, exp_name, work_dir):
             # LearningRateMonitor(logging_interval='step'),
             DsTQDMProgressBar(),
         ],
-        logger=TensorBoardLogger(
-            save_dir=str(work_dir),
-            name='lightning_logs',
-            version='lastest'
-        ),
+        logger=build_logger(config.get('logger', 'tensorboard'), work_dir, exp_name),
         # gradient_clip_val=config['clip_grad_norm'],
         val_check_interval=config['val_check_interval'] ,#* config['accumulate_grad_batches'],
         # so this is global_steps
