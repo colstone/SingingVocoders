@@ -101,6 +101,7 @@ class RefineGAN_dataset(Dataset):
                 audio_aug = wav_aug(audio, self.config["hop_size"], speed=speed)
                 mel_aug = dynamic_range_compression_torch(self.mel_spec_transform(audio_aug[None, :]))
                 f0, uv = get_pitch(
+                    self.config.get('pe', 'parselmouth'),
                     audio.numpy(),
                     hparams=self.config,
                     speed=speed,

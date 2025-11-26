@@ -39,26 +39,47 @@ def export(exp_name, ckpt_path, save_path, work_dir):
     
     config_file = pathlib.Path(ckpt_path).with_name('config.yaml')
     config = read_full_config(config_file)
+    task_cls = str(config.get('task_cls', '')).lower()
     new_config_file = pathlib.Path(save_path).with_name('config.json')
-    with open(new_config_file, 'w') as json_file:
-        new_config = config['model_args']
-        new_config['sampling_rate'] = config['audio_sample_rate']
-        new_config['num_mels'] = config['audio_num_mel_bins']
-        new_config['hop_size'] = config['hop_size']
-        new_config['n_fft'] = config['fft_size']
-        new_config['win_size'] = config['win_size']
-        new_config['fmin'] = config['fmin']
-        new_config['fmax'] = config['fmax']
+    model_args = dict(config.get('model_args', {}))  # shallow copy to avoid in-place edits
+    base_audio_cfg = {
+        'sampling_rate': config['audio_sample_rate'],
+        'num_mels': config['audio_num_mel_bins'],
+        'hop_size': config['hop_size'],
+        'n_fft': config['fft_size'],
+        'win_size': config['win_size'],
+        'fmin': config['fmin'],
+        'fmax': config['fmax'],
+    }
+
+    if 'refinegan' in task_cls:
+        # Only keep generator-related fields for RefineGAN export
+        refinegan_cfg = {
+            'task': 'RefineGAN',
+            **base_audio_cfg,
+            'downsample_rates': list(model_args.get('downsample_rates', [2, 2, 8, 8])),
+            'upsample_rates': list(model_args.get('upsample_rates', [8, 8, 2, 2])),
+            'start_channels': int(model_args.get('start_channels', 16)),
+            'leaky_relu_slope': float(model_args.get('leaky_relu_slope', 0.2)),
+            'template_generator': model_args.get('template_generator', 'comb'),
+        }
+        export_config = refinegan_cfg
+    else:
+        # Fallback to original export behavior
+        new_config = model_args
+        new_config.update(base_audio_cfg)
         if 'pc_aug' not in config.keys():
             new_config['pc_aug'] = False
         else:
-            new_config['pc_aug'] = config['pc_aug'] 
+            new_config['pc_aug'] = config['pc_aug']
         if 'mini_nsf' not in new_config.keys():
             new_config['mini_nsf'] = False
         if 'noise_sigma' not in new_config.keys():
             new_config['noise_sigma'] = 0.0
-        
-        json_file.write(json.dumps(new_config, indent=1))
+        export_config = new_config
+
+    with open(new_config_file, 'w') as json_file:
+        json_file.write(json.dumps(export_config, indent=1))
         print("Export configuration file successfully: ", new_config_file)
 
 
