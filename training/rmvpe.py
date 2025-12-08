@@ -180,7 +180,7 @@ class RMVPETask(pl.LightningModule):
         self.config = config
         self.save_hyperparameters(config)
         
-        self.model = E2E(config=config)
+        self.generator = E2E(config=config)
         
         self.alpha = config['alpha']
         self.gamma = config['gamma']
@@ -199,20 +199,20 @@ class RMVPETask(pl.LightningModule):
              # I will do it lazily or in dataloader creation to be safe.
 
     def forward(self, mel):
-        return self.model(mel)
+        return self.generator(mel)
 
     def training_step(self, batch, batch_idx):
         mel = batch['mel']
         pitch_label = batch['pitch']
         
-        hidden_vec, pitch_pred = self.model(mel)
+        hidden_vec, pitch_pred = self.generator(mel)
         loss = FL(pitch_pred, pitch_label, self.alpha, self.gamma)
         
         self.log('train/loss', loss, on_step=True, on_epoch=True, prog_bar=True)
         return loss
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
+        optimizer = torch.optim.Adam(self.generator.parameters(), lr=self.learning_rate)
         
         # Scheduler
         decay_steps = self.config.get('learning_rate_decay_steps', 1000) 
@@ -307,7 +307,7 @@ class RMVPETask(pl.LightningModule):
             
             # Forward
             # model expects (B, n_mels, 128)
-            hidden_vec, t_pitch_pred = self.model(t_mel)
+            hidden_vec, t_pitch_pred = self.generator(t_mel)
             t_pitch_pred = t_pitch_pred.squeeze(0) # (128, n_class)
             
             # Assign back
@@ -318,7 +318,9 @@ class RMVPETask(pl.LightningModule):
         self.log('val/loss', loss)
         
         # Metrics
-        pitch_th = 0.0 # From original code default
+        # Threshold for voicing detection (similar to Parselmouth's voicing_threshold)
+        # If max probability < pitch_th, it is considered unvoiced (F0=0)
+        pitch_th = 0.03 
         
         cents_pred = self.to_local_average_cents(pitch_pred.squeeze(0).cpu().numpy(), None, pitch_th)
         cents_label = self.to_local_average_cents(pitch_label.squeeze(0).cpu().numpy(), None, pitch_th)
@@ -345,8 +347,31 @@ class RMVPETask(pl.LightningModule):
             'VR': vr,
             'loss': loss.item()
         }
+        
+        if batch_idx == 0:
+            self.log_f0_comparison(freq, freq_pred)
+            
         self.validation_step_outputs.append(metrics)
         return metrics
+
+    def log_f0_comparison(self, f0_gt, f0_pred):
+        # 1. Histogram of error
+        diff = f0_gt - f0_pred
+        if hasattr(self.logger, 'experiment') and hasattr(self.logger.experiment, 'add_histogram'):
+             self.logger.experiment.add_histogram('val/f0_error_dist', diff, self.global_step)
+        
+        # 2. Contour Plot (Matplotlib)
+        import matplotlib.pyplot as plt
+        fig = plt.figure(figsize=(10, 6))
+        plt.plot(f0_gt, label='Ground Truth')
+        plt.plot(f0_pred, label='Prediction', alpha=0.7)
+        plt.legend()
+        plt.title(f"F0 Comparison Epoch {self.current_epoch}")
+        plt.tight_layout()
+        
+        if hasattr(self.logger, 'experiment') and hasattr(self.logger.experiment, 'add_figure'):
+             self.logger.experiment.add_figure('val/f0_comparison', fig, global_step=self.global_step)
+        plt.close(fig)
 
     def on_validation_epoch_end(self):
         outputs = self.validation_step_outputs
