@@ -6,6 +6,7 @@ from typing import Tuple
 
 import torch
 import torchaudio
+import numpy as np
 
 from utils.config_utils import read_full_config
 from utils.wav2mel import PitchAdjustableMelSpectrogram
@@ -128,6 +129,48 @@ def build_freev_nsf_generator(config: dict):
     return G
 
 
+def build_rmvpe_model(config: dict):
+    from models.rmvpe.model import E2E
+    G = E2E(config)
+    return G
+
+
+def extract_f0(pitch_extractor, wav_numpy, length, cfg, device):
+    rmvpe_model = None
+    pe_hparams = None
+    if pitch_extractor == 'rmvpe':
+        from models.rmvpe.model import E2E
+        rmvpe_config_path = pathlib.Path(cfg.get('pe_config', 'configs/rmvpe.yaml'))
+        pe_hparams = read_full_config(rmvpe_config_path)
+        ckpt_path = cfg.get('pe_ckpt', 'pretrained/rmvpe/model.pt')
+        
+        rmvpe_model = E2E(pe_hparams).to(device)
+        rmvpe_model.eval()
+        ckpt = torch.load(ckpt_path, map_location=device)
+        if isinstance(ckpt, dict) and 'state_dict' in ckpt:
+            sd = {k.replace('generator.', ''): v for k, v in ckpt['state_dict'].items() if k.startswith('generator.')}
+            if not sd: sd = ckpt['state_dict']
+            rmvpe_model.load_state_dict(sd, strict=False)
+        elif isinstance(ckpt, dict):
+            rmvpe_model.load_state_dict(ckpt, strict=False)
+
+    f0, uv = get_pitch(
+        pitch_extractor,
+        wav_numpy,
+        length=length,
+        hparams=cfg,
+        speed=1,
+        interp_uv=True,
+        model=rmvpe_model,
+        device=device,
+        mel=None,
+        pe_hparams=pe_hparams
+    )
+    if f0 is None:
+        raise RuntimeError("Pitch extractor returned all-UV; please choose a different audio segment.")
+    return torch.from_numpy(f0)[None, None, :].to(device)
+
+
 def load_generator_state_dict(ckpt_path: pathlib.Path, generator: torch.nn.Module, device: torch.device) -> Tuple[int, str]:
     ckpt = torch.load(str(ckpt_path), map_location=device)
     state_dict = ckpt.get('state_dict', ckpt)
@@ -182,6 +225,8 @@ def infer_one(config_path: pathlib.Path, ckpt_path: pathlib.Path, wav_path: path
         G = build_freev_generator(cfg)
     elif 'freev_nsf_task.FreeVNSFTask' in task_cls:
         G = build_freev_nsf_generator(cfg)
+    elif 'rmvpe.RMVPETask' in task_cls:
+        G = build_rmvpe_model(cfg)
     else:
         raise NotImplementedError(f"Unsupported task_cls: {task_cls}")
 
@@ -215,6 +260,26 @@ def infer_one(config_path: pathlib.Path, ckpt_path: pathlib.Path, wav_path: path
 
         # Prepare model-specific inputs
         task = task_cls
+        step_str = str(step) if step >= 0 else 'unknown'
+
+        if 'rmvpe.RMVPETask' in task:
+             f0, uv = get_pitch(
+                'rmvpe',
+                wav.squeeze(0).numpy(),
+                length=mel.shape[-1],
+                hparams=cfg,
+                speed=1,
+                interp_uv=True,
+                model=G,
+                device=device,
+                mel=mel,
+                pe_hparams=cfg
+             )
+             out_name = f"{wav_path.stem}.{task_name}_step{step_str}.f0.npy"
+             out_path = wav_path.with_name(out_name)
+             np.save(out_path, f0)
+             return out_path
+
         if (
             'refinegan_task.RefineGAN' in task
             or 'nsf_HiFigan_task.nsf_HiFigan' in task
@@ -227,17 +292,7 @@ def infer_one(config_path: pathlib.Path, ckpt_path: pathlib.Path, wav_path: path
             or 'univnet_ddsp.ddsp_univnet_task' in task
         ):
             # These require f0
-            f0, uv = get_pitch(
-                pitch_extractor,
-                wav.squeeze(0).numpy(),
-                length=mel.shape[-1],
-                hparams=cfg,
-                speed=1,
-                interp_uv=True,
-            )
-            if f0 is None:
-                raise RuntimeError("Pitch extractor returned all-UV; please choose a different audio segment.")
-            f0_t = torch.from_numpy(f0)[None, None, :].to(device)
+            f0_t = extract_f0(pitch_extractor, wav.squeeze(0).numpy(), mel.shape[-1], cfg, device)
         else:
             f0_t = None
 
@@ -290,17 +345,7 @@ def infer_one(config_path: pathlib.Path, ckpt_path: pathlib.Path, wav_path: path
             y_hat = G(mel)
         elif 'freev_nsf_task.FreeVNSFTask' in task:
             # requires f0
-            f0, uv = get_pitch(
-                pitch_extractor,
-                wav.squeeze(0).numpy(),
-                length=mel.shape[-1],
-                hparams=cfg,
-                speed=1,
-                interp_uv=True,
-            )
-            if f0 is None:
-                raise RuntimeError("Pitch extractor returned all-UV; please choose a different audio segment.")
-            f0_t = torch.from_numpy(f0)[None, None, :].to(device)
+            f0_t = extract_f0(pitch_extractor, wav.squeeze(0).numpy(), mel.shape[-1], cfg, device)
             y_hat = G(mel, f0_t)
         else:
             raise NotImplementedError(f"Unsupported task_cls: {task_cls}")
@@ -308,7 +353,7 @@ def infer_one(config_path: pathlib.Path, ckpt_path: pathlib.Path, wav_path: path
         y_hat = y_hat.squeeze(0).cpu()
 
     # Name output
-    step_str = str(step) if step >= 0 else 'unknown'
+    step_str = str(step) if step >= 0 else 'unknown' # Redundant if step_str defined above but okay
     out_name = f"{wav_path.stem}.{task_name}_step{step_str}.wav"
     out_path = wav_path.with_name(out_name)
     torchaudio.save(str(out_path), y_hat, sample_rate=target_sr)

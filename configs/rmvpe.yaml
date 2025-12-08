@@ -1,0 +1,69 @@
+# wave settings
+audio_sample_rate : 44100
+
+# f0 settings
+n_class : 360
+const : 1997.3794084376191
+f0_min: 65
+f0_max: 1100
+
+# mel settings 
+audio_num_mel_bins : 128
+fmin : 40
+fmax : 16000
+fft_size: 2048
+win_size : 2048
+hop_size : 512
+seq_l : 130560 ## Make Sure that seq_l % hop_size == 0 && (seq_l // hop_size + 1) % (2 ** en_de_layers) == 0
+
+# Model settings:
+n_blocks : 4 
+en_de_layers : 5 
+inter_layers : 4
+in_channels : 1
+en_out_channels : 16
+n_gru: 1 # or false
+
+# Learning settings:
+learning_rate : 5e-4
+batch_size : 16
+iterations : 100
+clip_grad_norm : 3
+alpha : 5.0
+gamma : 0.0
+learning_rate_decay_steps : 1000
+learning_rate_decay_rate : 0.98
+
+# dataset settings:
+DataIndexPath: 'data/rmvpe'
+valid_set_name: 'test'
+train_set_name: 'train'
+pitch_extractor : 'parselmouth'
+
+# save settings:
+logdir : 'runs'
+
+# Train Task Integration
+task_cls: training.rmvpe.RMVPETask
+ds_workers: 4
+dataloader_prefetch_factor: 2
+val_check_interval: 2000
+max_updates: 20000
+num_sanity_val_steps: 1
+num_ckpt_keep: 5
+permanent_ckpt_start: 20000
+permanent_ckpt_interval: 20000
+
+###########
+# PyTorch Lightning
+###########
+pl_trainer_accelerator: 'auto'
+pl_trainer_devices: 'auto'
+pl_trainer_precision: '32-true'
+pl_trainer_num_nodes: 1
+pl_trainer_strategy:
+  name: auto
+  process_group_backend: nccl
+  find_unused_parameters: true
+nccl_p2p: true
+seed: 114514
