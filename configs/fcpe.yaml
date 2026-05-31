@@ -1,0 +1,85 @@
+# ==========================================================================================
+# FCPE benchmark config.
+# mel / f0 / data / training settings are COPIED VERBATIM from rmvpe.yaml and MUST stay identical
+# (same 128-bin mel, hop 512, fmax 16000, same seq_l) so the only variable vs RMVPE is the backbone.
+# Differences from rmvpe.yaml: pitch_extractor (harvest), task_cls (FCPETask), + the FCPE model block.
+# ==========================================================================================
+
+# wave settings
+audio_sample_rate : 44100
+
+# f0 settings
+n_class : 360
+const : 1997.3794084376191
+f0_min: 65
+f0_max: 1100
+
+# mel settings  (UNCHANGED — do not swap to FCPE's own mel params)
+audio_num_mel_bins : 128
+fmin : 40
+fmax : 16000
+fft_size: 2048
+win_size : 2048
+hop_size : 512
+seq_l : 130560 ## Make Sure that seq_l % hop_size == 0 && (seq_l // hop_size + 1) % (2 ** en_de_layers) == 0
+en_de_layers : 5  # only kept to satisfy the reused RMVPE_dataset assertion; FCPE itself ignores it
+
+# FCPE model settings (CFNaiveMelPE). Defaults follow FCPE/train/configs/config.yaml.
+hidden_dims : 512
+n_layers : 6
+n_heads : 8
+conv_only : true        # depthwise-conv "Lynx-Net" backbone, attention off (FCPE default)
+use_fa_norm : true
+conv_dropout : 0.0
+atten_dropout : 0.0
+use_harmonic_emb : false
+# model_f0_min/model_f0_max only set CFNaiveMelPE's internal (unused) cent_table; leave at FCPE defaults.
+model_f0_min : 32.70
+model_f0_max : 1975.5
+
+# Learning settings:
+learning_rate : 5e-4
+batch_size : 16
+iterations : 100
+clip_grad_norm : 3
+alpha : 5.0
+gamma : 0.0
+learning_rate_decay_steps : 1000
+learning_rate_decay_rate : 0.98
+
+# Validation:
+pitch_th : 0.03  # voicing threshold for decoding during validation (tunable)
+
+# dataset settings:
+DataIndexPath: 'data/rmvpe'
+valid_set_name: 'test'
+train_set_name: 'train'
+pitch_extractor : 'harvest'   # cleaner teacher than parselmouth (fewer octave/voicing errors)
+
+# save settings:
+logdir : 'runs'
+
+# Train Task Integration
+task_cls: training.fcpe.FCPETask
+ds_workers: 4
+dataloader_prefetch_factor: 2
+val_check_interval: 2000
+max_updates: 20000
+num_sanity_val_steps: 1
+num_ckpt_keep: 5
+permanent_ckpt_start: 20000
+permanent_ckpt_interval: 20000
+
+###########
+# PyTorch Lightning
+###########
+pl_trainer_accelerator: 'auto'
+pl_trainer_devices: 'auto'
+pl_trainer_precision: '32-true'
+pl_trainer_num_nodes: 1
+pl_trainer_strategy:
+  name: auto
+  process_group_backend: nccl
+  find_unused_parameters: true
+nccl_p2p: true
+seed: 114514
