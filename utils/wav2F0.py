@@ -5,7 +5,6 @@ import pyworld as pw
 import torch
 import torch.nn.functional as F
 
-from models.rmvpe.model import E2E
 from utils.wav2mel import PitchAdjustableMelSpectrogram
 
 # from utils.pitch_utils import interp_f0
@@ -14,6 +13,7 @@ PITCH_EXTRACTORS_ID_TO_NAME = {
     1: 'parselmouth',
     2: 'harvest',
     3: 'rmvpe',
+    4: 'fcpe',
 }
 PITCH_EXTRACTORS_NAME_TO_ID = {v: k for k, v in PITCH_EXTRACTORS_ID_TO_NAME.items()}
 
@@ -77,23 +77,31 @@ def get_pitch(pe, wav_data, length, hparams, speed=1, interp_uv=False, **kwargs)
         return get_pitch_harvest(wav_data, length, hparams, speed=speed, interp_uv=interp_uv)
     elif pe == 'rmvpe':
         return get_pitch_rmvpe(wav=wav_data, length=length, hparams=hparams, model=kwargs.get('model'), device=kwargs.get('device'), mel=kwargs.get('mel'), pe_hparams=kwargs.get('pe_hparams'), speed=speed, interp_uv=interp_uv)
+    elif pe == 'fcpe':
+        return get_pitch_fcpe(wav=wav_data, length=length, hparams=hparams, model=kwargs.get('model'), device=kwargs.get('device'), mel=kwargs.get('mel'), pe_hparams=kwargs.get('pe_hparams'), speed=speed, interp_uv=interp_uv)
     else:
         raise ValueError(f" [x] Unknown pitch extractor: {pe}")
 
 
-def get_pitch_rmvpe(wav=None, mel=None, length=None, hparams=None, model=None, device=None, pe_hparams=None, speed=1, interp_uv=False):
+def _run_pitch_model(forward_fn, wav=None, mel=None, length=None, hparams=None, model=None, device=None,
+                     pe_hparams=None, speed=1, interp_uv=False):
+    """Pure shared pipeline for the model-based PE encoders (RMVPE / FCPE), with NO per-model branching:
+    (optionally) wav -> mel, move to device, `pitch_pred = forward_fn(model, mel, mel_config)` (per-frame
+    logits, (T, n_class)), decode to f0 (Hz), align to `length`, optionally interpolate unvoiced.
+    The per-model difference (how the model is run over the mel) lives in forward_fn, supplied by
+    get_pitch_rmvpe / get_pitch_fcpe.
+    """
     if wav is None and mel is None:
         raise ValueError("wav and mel cannot be both None")
     if model is None:
-        raise ValueError("RMVPE model must be passed to get_pitch_rmvpe")
+        raise ValueError("a model must be passed to the model-based pitch extractor")
     if device is None:
         device = torch.device('cpu')
 
-    # Config for Mel Extraction
-    # Use pe_hparams if available (model specific config), else hparams (vocoder config)
+    # Use pe_hparams if available (model-specific config), else hparams (vocoder config)
     mel_config = pe_hparams if pe_hparams is not None else hparams
     if mel_config is None and mel is None:
-         raise ValueError("hparams or pe_hparams must be provided if mel is None")
+        raise ValueError("hparams or pe_hparams must be provided if mel is None")
 
     if mel is None:
         # Compute mel from wav
@@ -102,9 +110,8 @@ def get_pitch_rmvpe(wav=None, mel=None, length=None, hparams=None, model=None, d
             wav_data = wav_data.cpu().numpy()
         if wav_data.ndim > 1:
             wav_data = wav_data.flatten()
-            
+
         hop_size = int(np.round(mel_config['hop_size'] * speed))
-        
         mel_extractor = PitchAdjustableMelSpectrogram(
             sample_rate=mel_config['audio_sample_rate'],
             n_fft=mel_config['fft_size'],
@@ -114,89 +121,73 @@ def get_pitch_rmvpe(wav=None, mel=None, length=None, hparams=None, model=None, d
             f_max=mel_config['fmax'],
             n_mels=mel_config['audio_num_mel_bins'],
         ).to(device)
-        
+
         pad_len = hop_size // 2
         wav_data_padded = np.pad(wav_data, (pad_len, pad_len), mode='reflect')
         audio_t = torch.from_numpy(wav_data_padded).float().to(device).unsqueeze(0)
-        
         with torch.no_grad():
-            mel = mel_extractor(audio_t) # (1, n_mels, T)
+            mel = mel_extractor(audio_t)  # (1, n_mels, T)
             mel = mel_extractor.dynamic_range_compression_torch(mel)
-    
-    # Ensure mel is on device and correct shape
+
     mel = mel.to(device)
     if mel.ndim == 2:
-        mel = mel.unsqueeze(0) # (1, n_mels, T)
+        mel = mel.unsqueeze(0)  # (1, n_mels, T)
 
     with torch.no_grad():
-        # Chunking & Batching to match training behavior and speed up
-        chunk_size = 128
-        batch_size = mel_config.get('batch_size', 1)
-        
-        T = mel.shape[-1]
-        
-        # Pad to multiple of chunk_size
-        pad_frames = 0
-        if T % chunk_size != 0:
-            pad_frames = chunk_size - (T % chunk_size)
-            mel = F.pad(mel, (0, pad_frames))
-            
-        # Reshape: (1, n_mels, T_padded) -> (N, n_mels, 128)
-        # mel is (1, n_mels, T_padded)
-        N = mel.shape[-1] // chunk_size
-        chunks = mel.view(1, mel.shape[1], N, chunk_size).transpose(1, 2).squeeze(0) # (N, n_mels, 128)
-        
-        pitch_pred_list = []
-        for i in range(0, N, batch_size):
-            batch = chunks[i : i + batch_size]
-            # Forward
-            hidden, pred = model(batch)
-            # pred: (B, 128, n_class)
-            pitch_pred_list.append(pred)
-            
-        pitch_pred = torch.cat(pitch_pred_list, dim=0) # (N, 128, n_class)
-        pitch_pred = pitch_pred.reshape(-1, pitch_pred.shape[-1]) # (N*128, n_class)
-        
-        if pad_frames > 0:
-            pitch_pred = pitch_pred[:T]
-        
+        pitch_pred = forward_fn(model, mel, mel_config)   # (T, n_class)
         cents = to_local_average_cents(pitch_pred.cpu().numpy(), None, thred=0.03)
         f0 = np.array([10 * (2 ** (c / 1200)) if c > 0 else 0 for c in cents])
 
-    # Interpolate if resolution mismatch (e.g. RMVPE hop != Vocoder hop)
-    # Target time steps: length
+    # Align to the requested frame count (handles a PE hop != vocoder hop via time-axis interpolation)
     if length is not None and len(f0) != length:
-        # Linear interpolation
-        # Current time steps
         if pe_hparams and hparams and pe_hparams['hop_size'] != hparams['hop_size']:
-             # Use time axis mapping
-             # RMVPE time
-             rmvpe_hop = pe_hparams['hop_size'] * speed
-             t_rmvpe = np.arange(len(f0)) * rmvpe_hop / mel_config['audio_sample_rate']
-             
-             # Target time
-             target_hop = hparams['hop_size'] * speed
-             t_target = np.arange(length) * target_hop / hparams['audio_sample_rate']
-             
-             f0 = np.interp(t_target, t_rmvpe, f0)
+            src_hop = pe_hparams['hop_size'] * speed
+            t_src = np.arange(len(f0)) * src_hop / mel_config['audio_sample_rate']
+            t_tgt = np.arange(length) * (hparams['hop_size'] * speed) / hparams['audio_sample_rate']
+            f0 = np.interp(t_tgt, t_src, f0)
         else:
-             # Just resize/pad (assuming small mismatch due to rounding)
-             if len(f0) < length:
+            if len(f0) < length:
                 f0 = np.pad(f0, (0, length - len(f0)))
-             f0 = f0[:length]
+            f0 = f0[:length]
     elif length is not None:
-         # length match check
-         if len(f0) < length:
+        if len(f0) < length:
             f0 = np.pad(f0, (0, length - len(f0)))
-         f0 = f0[:length]
-    
+        f0 = f0[:length]
+
     uv = f0 == 0
     if uv.any() and interp_uv:
         f0, uv = interp_f0(f0, uv)
-        
     return f0, uv
 
-   
+
+def get_pitch_rmvpe(wav=None, mel=None, length=None, hparams=None, model=None, device=None, pe_hparams=None, speed=1, interp_uv=False):
+    def forward(model, mel, mel_config):
+        # RMVPE's 2D DeepUnet runs on fixed 128-frame chunks (its training shape): pad to a multiple,
+        # run per window, concat, crop back.
+        chunk_size = 128
+        bs = mel_config.get('batch_size', 1)
+        T = mel.shape[-1]
+        pad_frames = (-T) % chunk_size
+        if pad_frames:
+            mel = F.pad(mel, (0, pad_frames))
+        N = mel.shape[-1] // chunk_size
+        chunks = mel.view(1, mel.shape[1], N, chunk_size).transpose(1, 2).squeeze(0)  # (N, n_mels, chunk)
+        preds = [model(chunks[i:i + bs])[1] for i in range(0, N, bs)]                 # each (B, chunk, n_class)
+        return torch.cat(preds, dim=0).reshape(-1, preds[0].shape[-1])[:T]            # (T, n_class)
+
+    return _run_pitch_model(forward, wav=wav, mel=mel, length=length, hparams=hparams, model=model,
+                            device=device, pe_hparams=pe_hparams, speed=speed, interp_uv=interp_uv)
+
+
+def get_pitch_fcpe(wav=None, mel=None, length=None, hparams=None, model=None, device=None, pe_hparams=None, speed=1, interp_uv=False):
+    def forward(model, mel, mel_config):
+        # FCPE (CFNaiveMelPE) handles arbitrary T -> run the full mel, no chunking.
+        return model(mel)[1].squeeze(0)                                              # (T, n_class)
+
+    return _run_pitch_model(forward, wav=wav, mel=mel, length=length, hparams=hparams, model=model,
+                            device=device, pe_hparams=pe_hparams, speed=speed, interp_uv=interp_uv)
+
+
 def get_pitch_parselmouth(wav_data, length, hparams, speed=1, interp_uv=False):
     """
 

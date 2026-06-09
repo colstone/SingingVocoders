@@ -1,0 +1,95 @@
+# ==========================================================================================
+# Shared BASE for the pitch (mel->f0) models. configs/fcpe.yaml and configs/rmvpe.yaml each set
+#   base_config: [configs/base_pitch.yaml]
+# and add ONLY their task_cls + model block, so the two backbones train on identical
+# data / mel / f0 / seq_l / task / instrumentation -> a fair A/B. (Do not run this file directly.)
+#
+# Data pipeline = same as the vocoders: run `python process.py --config configs/fcpe.yaml`
+# (FCPE & RMVPE share the data) to precompute per-clip .npz (mel + harvest f0/uv) + a train/test
+# index text file, then train reading those via CachedF0Dataset. The mel is the LOCKED vocoder mel
+# (128 bins / hop 512 / fmax 16000, log clip_val=1e-9) so the pitch model's input matches the
+# vocoder's conditioning mel (= the deploy TTS-mel domain).
+# ==========================================================================================
+
+# wave settings
+audio_sample_rate : 44100
+
+# f0 settings
+n_class : 360
+const : 1997.3794084376191
+f0_min: 65
+f0_max: 1100
+
+# mel settings  (LOCKED to the vocoder mel — do not change)
+audio_num_mel_bins : 128
+fmin : 40
+fmax : 16000
+fft_size: 2048
+win_size : 2048
+hop_size : 512
+seq_l : 130560 ## seq_l % hop_size == 0 && (seq_l // hop_size + 1) % time_multiple == 0 (checked per-backbone in the dataset)
+# NOTE: en_de_layers is RMVPE-only (DeepUNet depth + its time_multiple = 2**en_de_layers) -> it lives in configs/rmvpe.yaml.
+
+# Learning settings:
+learning_rate : 5e-4
+batch_size : 64
+iterations : 100
+clip_grad_norm : 3
+alpha : 5.0
+gamma : 0.0
+learning_rate_decay_steps : 1000
+learning_rate_decay_rate : 0.98
+
+# Validation:
+pitch_th : 0.03  # voicing threshold for decoding during validation (tunable)
+train_probe_num : 30  # also evaluate this many training files each val cycle -> logs train/* alongside val/* (0 to disable)
+
+# Early stopping / best-val checkpoint (overfit guard; drives off the logged val/committed_accuracy).
+best_ckpt_monitor : val/committed_accuracy
+best_ckpt_mode : max
+early_stopping_monitor : val/committed_accuracy
+early_stopping_mode : max
+early_stopping_patience : 15                 # in val cycles (× val_check_interval steps)
+early_stopping_min_delta : 0.001
+
+# ---- Data: precompute with process.py, then train via CachedF0Dataset ------------------------
+# process.py reads pe/data_input_path/data_out_path/val_num, writes per-clip .npz into data_out_path,
+# and writes the index text files data/pitch_prediction/{train,test}.
+dataset_cls : training.base_task_pitch.CachedF0Dataset
+DataIndexPath : 'data/pitch_prediction'   # process.py writes the train/test index files here
+train_set_name : 'train'
+valid_set_name : 'test'
+pe : harvest                               # process.py pitch extractor (cleaner teacher than parselmouth)
+data_input_path:                           # CLEAN multi-speaker zh+ja wav roots (>=3s, no noise/reverb/accompaniment)
+  - 'data/pitch_prediction/wav_raw'
+data_out_path:                             # per-clip .npz output dir(s), one-to-one with data_input_path
+  - 'data/pitch_prediction/pitch_npz'
+val_num : 500                              # how many clips process.py holds out as the test/val split
+
+# save settings:
+logdir : 'runs'
+
+# Train Task Integration
+# task_cls is set per-leaf: configs/fcpe.yaml -> training.fcpe_task.FCPETask, configs/rmvpe.yaml -> training.rmvpe_task.RMVPETask
+ds_workers: 8                      # cached dataset is IO-bound (np.load per item); more workers help
+dataloader_prefetch_factor: 2
+val_check_interval: 2000
+max_updates: 200000                # early stopping keeps the best-val ckpt, so this is just a ceiling
+num_sanity_val_steps: 1
+num_ckpt_keep: 5
+permanent_ckpt_start: 20000
+permanent_ckpt_interval: 20000
+
+###########
+# PyTorch Lightning
+###########
+pl_trainer_accelerator: 'auto'
+pl_trainer_devices: 'auto'
+pl_trainer_precision: '32-true'
+pl_trainer_num_nodes: 1
+pl_trainer_strategy:
+  name: auto
+  process_group_backend: nccl
+  find_unused_parameters: true
+nccl_p2p: true
+seed: 114514

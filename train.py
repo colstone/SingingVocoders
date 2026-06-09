@@ -4,6 +4,9 @@ import os
 import pathlib
 import sys
 
+import matplotlib
+matplotlib.use('Agg')  # headless: set before any pyplot import -> no Tk backend (avoids Tcl_AsyncDelete crash)
+
 import click
 import lightning.pytorch as pl
 import torch.utils.data
@@ -164,6 +167,47 @@ def train(config, exp_name, work_dir):
     task = task_cls(config=config)
 
     # work_dir = pathlib.Path(config['work_dir'])
+    callbacks = [
+        DsModelCheckpoint(
+            dirpath=work_dir,
+            filename='model_ckpt_steps_{step}',
+            auto_insert_metric_name=False,
+            monitor='step',
+            mode='max',
+            save_last=False,
+            # every_n_train_steps=config['val_check_interval'],
+            save_top_k=config['num_ckpt_keep'],
+            permanent_ckpt_start=config['permanent_ckpt_start'],
+            permanent_ckpt_interval=config['permanent_ckpt_interval'],
+            verbose=True
+        ),
+        DsTQDMProgressBar(),
+    ]
+    # Optional: keep the BEST-val checkpoint (overfit guard) + early stopping.
+    # Config-gated so non-FCPE tasks (which may not log the metric) are unaffected.
+    best_monitor = config.get('best_ckpt_monitor')  # e.g. 'val/committed_accuracy'
+    if best_monitor:
+        from lightning.pytorch.callbacks import ModelCheckpoint
+        callbacks.append(ModelCheckpoint(
+            dirpath=work_dir,
+            filename='best_{step}',
+            auto_insert_metric_name=False,
+            monitor=best_monitor,
+            mode=config.get('best_ckpt_mode', 'max'),
+            save_top_k=1,
+            save_last=False,
+            verbose=True,
+        ))
+    es_monitor = config.get('early_stopping_monitor')  # e.g. 'val/committed_accuracy'
+    if es_monitor:
+        from lightning.pytorch.callbacks import EarlyStopping
+        callbacks.append(EarlyStopping(
+            monitor=es_monitor,
+            mode=config.get('early_stopping_mode', 'max'),
+            patience=config.get('early_stopping_patience', 10),
+            min_delta=config.get('early_stopping_min_delta', 0.0),
+            verbose=True,
+        ))
     trainer = pl.Trainer(
         accelerator=config['pl_trainer_accelerator'],
         devices=config['pl_trainer_devices'],
@@ -176,23 +220,7 @@ def train(config, exp_name, work_dir):
             config['pl_trainer_precision'],
         ),
         precision=config['pl_trainer_precision'],
-        callbacks=[
-            DsModelCheckpoint(
-                dirpath=work_dir,
-                filename='model_ckpt_steps_{step}',
-                auto_insert_metric_name=False,
-                monitor='step',
-                mode='max',
-                save_last=False,
-                # every_n_train_steps=config['val_check_interval'],
-                save_top_k=config['num_ckpt_keep'],
-                permanent_ckpt_start=config['permanent_ckpt_start'],
-                permanent_ckpt_interval=config['permanent_ckpt_interval'],
-                verbose=True
-            ),
-            # LearningRateMonitor(logging_interval='step'),
-            DsTQDMProgressBar(),
-        ],
+        callbacks=callbacks,
         logger=build_logger(config.get('logger', 'tensorboard'), work_dir, exp_name),
         # gradient_clip_val=config['clip_grad_norm'],
         val_check_interval=config['val_check_interval'] ,#* config['accumulate_grad_batches'],

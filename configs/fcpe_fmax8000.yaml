@@ -1,9 +1,0 @@
-# Diagnostic-only config: identical to fcpe.yaml but with fmax=8000.
-# Purpose: quantify how much the vocoder mel's fmax=16000 (which wastes ~30 of 128 bins on 8-16kHz)
-# costs in pitch accuracy. The mel is recomputed from the same wavs at train time — this does NOT
-# touch the vocoder. The fmax16000-vs-fmax8000 RPA gap tells us whether the bottleneck is the
-# architecture or the input representation.
-base_config:
-  - configs/fcpe.yaml
-
-fmax : 8000

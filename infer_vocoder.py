@@ -135,6 +135,12 @@ def build_rmvpe_model(config: dict):
     return G
 
 
+def build_fcpe_model(config: dict):
+    from models.fcpe import FCPE_E2E
+    G = FCPE_E2E(config)
+    return G
+
+
 def extract_f0(pitch_extractor, wav_numpy, length, cfg, device):
     rmvpe_model = None
     pe_hparams = None
@@ -225,8 +231,10 @@ def infer_one(config_path: pathlib.Path, ckpt_path: pathlib.Path, wav_path: path
         G = build_freev_generator(cfg)
     elif 'freev_nsf_task.FreeVNSFTask' in task_cls:
         G = build_freev_nsf_generator(cfg)
-    elif 'rmvpe.RMVPETask' in task_cls:
+    elif 'rmvpe_task.RMVPETask' in task_cls:
         G = build_rmvpe_model(cfg)
+    elif 'fcpe_task.FCPETask' in task_cls:
+        G = build_fcpe_model(cfg)
     else:
         raise NotImplementedError(f"Unsupported task_cls: {task_cls}")
 
@@ -262,9 +270,27 @@ def infer_one(config_path: pathlib.Path, ckpt_path: pathlib.Path, wav_path: path
         task = task_cls
         step_str = str(step) if step >= 0 else 'unknown'
 
-        if 'rmvpe.RMVPETask' in task:
+        if 'rmvpe_task.RMVPETask' in task:
              f0, uv = get_pitch(
                 'rmvpe',
+                wav.squeeze(0).numpy(),
+                length=mel.shape[-1],
+                hparams=cfg,
+                speed=1,
+                interp_uv=True,
+                model=G,
+                device=device,
+                mel=mel,
+                pe_hparams=cfg
+             )
+             out_name = f"{wav_path.stem}.{task_name}_step{step_str}.f0.npy"
+             out_path = wav_path.with_name(out_name)
+             np.save(out_path, f0)
+             return out_path
+
+        if 'fcpe_task.FCPETask' in task:
+             f0, uv = get_pitch(
+                'fcpe',
                 wav.squeeze(0).numpy(),
                 length=mel.shape[-1],
                 hparams=cfg,
