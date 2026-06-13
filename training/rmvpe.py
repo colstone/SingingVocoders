@@ -1,177 +1,31 @@
-import logging
+import importlib
 import os
 
-import librosa
 import numpy as np
 import torch
 import torch.nn.functional as F
 import lightning.pytorch as pl
 from torch.optim.lr_scheduler import StepLR
-from torch.utils.data import DataLoader, Dataset
-from glob import glob
+from torch.utils.data import DataLoader
 
 from mir_eval.melody import raw_pitch_accuracy, to_cent_voicing, raw_chroma_accuracy, overall_accuracy
 from mir_eval.melody import voicing_recall, voicing_false_alarm
 
 from models.rmvpe.model import E2E
 from modules.loss.rmvpe_loss import FL, bce
-from utils.wav2F0 import get_pitch
-from utils.wav2mel import PitchAdjustableMelSpectrogram
 
 
-class RMVPE_dataset(Dataset):
-    def __init__(self, config: dict, path, test=False):
-        super().__init__()
-        self.config = config
-        self.path = path
-        self.hop_length = config["hop_size"]
-        self.seq_len = config['seq_l'] if not test else None
-        en_de_layers = config['en_de_layers']
-        self.CONST = config['const']
-        self.win_size = config['win_size']
-        if self.seq_len is not None:
-            assert self.seq_len % self.hop_length == 0
-            assert ((self.seq_len // self.hop_length) + 1) % (2 ** en_de_layers) == 0
+def build_dataset(config, path, test=False, max_files=None):
+    """Instantiate the dataset named by config['dataset_cls'] (default CachedF0Dataset).
 
-        self.num_class = config['n_class']
-
-        self.mel_tf = PitchAdjustableMelSpectrogram(
-            sample_rate=config['audio_sample_rate'],
-            n_fft=config['fft_size'],
-            win_length=self.win_size,
-            hop_length=self.hop_length,
-            f_min=config['fmin'],
-            f_max=config['fmax'],
-            n_mels=config['audio_num_mel_bins'],
-        )
-
-        self.data = []
-        # Pre-load data logic from original code
-        # Note: This loads everything into memory. 
-        # Ideally this should be done lazily or cached, but sticking to original logic for consistency.
-        files = glob(os.path.join(self.path, '*.wav'))
-        if not files:
-            logging.warning(f"No wav files found in {self.path}")
-        
-        for audio_file in files:
-            self.data.extend(self.load(audio_file))
-
-    def load(self, audio_path):
-        data = []
-        try:
-            audio, _ = librosa.load(audio_path, sr=self.config['audio_sample_rate'])
-        except Exception as e:
-            logging.error(f"Error loading {audio_path}: {e}")
-            return []
-
-        # Pad with hop_length // 2 to align Mel (which adds (win-hop)/2) with F0
-        audio_l = len(audio)
-        audio = np.pad(audio, self.hop_length // 2, mode='reflect')
-
-        audio_tensor = torch.from_numpy(audio).float()
-        # mel_tf expects (B, T) or (T)? Unsqueeze helps.
-        # Original code used .to(device) here but we should keep it CPU until getitem/collate
-        with torch.no_grad():
-            mel = self.mel_tf(audio_tensor.unsqueeze(0)).squeeze()  # (n_mels, T)
-            mel = self.mel_tf.dynamic_range_compression_torch(x=mel)
-
-        audio_steps = mel.shape[-1]
-
-        pitch_label = torch.zeros(audio_steps, self.num_class, dtype=torch.float)
-        voice_label = torch.zeros(audio_steps, dtype=torch.float)
-
-        try:
-            raw_f0, uv = get_pitch(
-                pe=self.config["pitch_extractor"],
-                wav_data=audio,
-                length=audio_steps,
-                hparams=self.config)
-        except Exception as e:
-             logging.error(f"Error extracting pitch for {audio_path}: {e}")
-             return []
-
-        if raw_f0 is None:
-            # raise RuntimeError("Pitch extractor returned all-UV; please choose a different audio segment.")
-            logging.warning(f"Pitch extractor returned None for {audio_path}")
-            return []
-
-        for i, freq in enumerate(raw_f0):
-            if float(freq) != 0:
-                cent = 1200 * np.log2(freq / 10)
-                index = int(round((cent - self.CONST) / 20))
-                if 0 <= index < self.num_class:
-                    pitch_label[i][index] = 1
-                    voice_label[i] = 1
-
-        if self.seq_len is not None:
-            n_steps = self.seq_len // self.hop_length + 1
-            # Calculate how many segments
-            if audio_l >= self.seq_len:
-                for i in range(audio_l // self.seq_len):
-                    begin_t = i * self.seq_len
-                    begin_step = begin_t // self.hop_length
-                    end_step = begin_step + n_steps
-                    
-                    if end_step <= mel.shape[1]:
-                        data.append(dict(mel=mel[:, begin_step:end_step], 
-                                         pitch=pitch_label[begin_step:end_step],
-                                         voice=voice_label[begin_step:end_step], 
-                                         file=audio_path))
-                
-                # Handle last segment if needed or just skip? 
-                # Original code:
-                # data.append(dict(mel=mel[:, -n_steps:], pitch=pitch_label[-n_steps:],
-                #              voice=voice_label[-n_steps:], file=audio_path))
-                # We can keep the last segment logic
-                data.append(dict(mel=mel[:, -n_steps:], pitch=pitch_label[-n_steps:],
-                                 voice=voice_label[-n_steps:], file=audio_path))
-            else:
-                 # Audio too short for seq_len, pad or skip? 
-                 # For training usually we need fixed size. Original code doesn't seem to handle short audio explicitly in loop
-                 pass
-        else:
-            # For validation (test=True), seq_len is None, we return full sequence
-            data.append(dict(mel=mel, pitch=pitch_label, voice=voice_label, file=audio_path))
-
-        return data
-
-    def __getitem__(self, index):
-        return self.data[index]
-
-    def __len__(self):
-        return len(self.data)
-    
-    def collate_fn(self, batch):
-        # Basic collate
-        # keys: mel, pitch, voice, file
-        # Check if all have same size (training) or different (validation)
-        # If training, stack. If validation, batch_size should be 1 usually.
-        
-        mels = [item['mel'] for item in batch]
-        pitches = [item['pitch'] for item in batch]
-        voices = [item['voice'] for item in batch]
-        files = [item['file'] for item in batch]
-
-        # Check shapes
-        if len(set(m.shape[1] for m in mels)) == 1:
-            return {
-                'mel': torch.stack(mels),
-                'pitch': torch.stack(pitches),
-                'voice': torch.stack(voices),
-                'file': files
-            }
-        else:
-            # Different lengths (validation) - return list or assume batch_size=1 and stack 
-            # (if batch_size=1, stack works)
-            if len(batch) == 1:
-                 return {
-                    'mel': torch.stack(mels),
-                    'pitch': torch.stack(pitches),
-                    'voice': torch.stack(voices),
-                    'file': files
-                }
-            else:
-                 raise RuntimeError("Batch elements have different lengths, use batch_size=1 for validation")
+    The dataset reads process.py's precomputed .npz (mel/f0/uv) via an index text file at
+    `path` (= DataIndexPath/{train,valid}_set_name). All dataset classes share the
+    (config, path, test, max_files) signature and a collate_fn.
+    """
+    cls_path = config.get('dataset_cls', 'training.cached_dataset.CachedF0Dataset')
+    module_name, cls_name = cls_path.rsplit('.', 1)
+    cls = getattr(importlib.import_module(module_name), cls_name)
+    return cls(config=config, path=path, test=test, max_files=max_files)
 
 
 class RMVPETask(pl.LightningModule):
@@ -248,8 +102,8 @@ class RMVPETask(pl.LightningModule):
         }
 
     def train_dataloader(self):
-        dataset = RMVPE_dataset(
-            config=self.config, 
+        dataset = build_dataset(
+            config=self.config,
             path=os.path.join(self.config['DataIndexPath'], self.config['train_set_name']),
             test=False
         )
@@ -270,8 +124,8 @@ class RMVPETask(pl.LightningModule):
         )
 
     def val_dataloader(self):
-        dataset = RMVPE_dataset(
-            config=self.config, 
+        dataset = build_dataset(
+            config=self.config,
             path=os.path.join(self.config['DataIndexPath'], self.config['valid_set_name']),
             test=True
         )
@@ -361,6 +215,8 @@ class RMVPETask(pl.LightningModule):
              self.logger.experiment.add_histogram('val/f0_error_dist', diff, self.global_step)
         
         # 2. Contour Plot (Matplotlib)
+        import matplotlib
+        matplotlib.use('Agg')  # headless backend: avoid Tk (Tcl_AsyncDelete crash from figure GC on worker threads)
         import matplotlib.pyplot as plt
         fig = plt.figure(figsize=(10, 6))
         plt.plot(f0_gt, label='Ground Truth')

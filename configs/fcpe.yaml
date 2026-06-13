@@ -1,0 +1,29 @@
+# ==========================================================================================
+# FCPE mel->f0 config. Inherits all wave/mel/f0/data/seq_l/task/training/early-stopping keys from
+# configs/base_pitch.yaml and adds ONLY the FCPE backbone (CFNaiveMelPE, ~10M params).
+# The RMVPE counterpart is configs/rmvpe.yaml — both share base_pitch.yaml => a fair A/B on the same
+# precomputed features (data/pitch_prediction).
+#
+# Preprocess (FCPE & RMVPE share ONE feature set -> run once):
+#   python process.py --config configs/fcpe.yaml --num_cpu <N>
+# Train:
+#   python train.py --config configs/fcpe.yaml --exp_name fcpe_unified
+# ==========================================================================================
+base_config:
+  - configs/base_pitch.yaml
+
+# FCPETask (training/fcpe_task.py) builds the FCPE backbone CFNaiveMelPE.
+task_cls : training.fcpe_task.FCPETask
+
+# FCPE backbone hyperparameters. Defaults follow FCPE/train/configs/config.yaml.
+hidden_dims : 512
+n_layers : 6
+n_heads : 8
+conv_only : true        # depthwise-conv "Lynx-Net" backbone, attention off (FCPE default)
+use_fa_norm : true
+conv_dropout : 0.0
+atten_dropout : 0.0
+use_harmonic_emb : false
+# model_f0_min/model_f0_max only set CFNaiveMelPE's internal (unused) cent_table; leave at FCPE defaults.
+model_f0_min : 32.70
+model_f0_max : 1975.5
